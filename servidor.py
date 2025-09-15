@@ -3,11 +3,12 @@ import pyodbc
 
 app = FastAPI()
 
+# Configuración SQL Server
 driver = "{ODBC Driver 17 for SQL Server}"
 server = "localhost"
 database = "Tesis"
 username = "sa"
-password = "tu_password_segura"
+password = "Guadual1t0"
 
 connection_string = f"""
     DRIVER={driver};
@@ -22,17 +23,19 @@ connection_string = f"""
 def home():
     return {"status": "Servidor en línea ✅"}
 
-@app.post("/guardar_uid/{uid}")
-def guardar_uid(uid: str):
+@app.get("/verificar/{uid}")
+def verificar_uid(uid: str):
     try:
         conn = pyodbc.connect(connection_string)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO TarjetasNFC (UID) VALUES (?)", (uid,))
-        conn.commit()
-        return {"status": "OK", "uid": uid}
+        cursor.execute("SELECT Activa FROM TarjetasNFC WHERE UID = ?", (uid,))
+        row = cursor.fetchone()
+        if row:
+            if row[0] == 1:
+                return {"autorizado": True, "uid": uid}
+            else:
+                return {"autorizado": False, "uid": uid, "motivo": "Tarjeta inactiva ❌"}
+        else:
+            return {"autorizado": False, "uid": uid, "motivo": "No registrada ❌"}
     except Exception as e:
         return {"status": "Error", "detalle": str(e)}
-
-@app.get("/test")
-async def test_connection():
-    return {"status": "ok", "message": "ESP32 conectado correctamente 🚀"}

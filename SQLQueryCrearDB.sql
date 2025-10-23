@@ -312,7 +312,22 @@ DECLARE @msg VARBINARY(MAX) = CONVERT(VARBINARY(MAX), 'mensaje123');
 SELECT dbo.fn_HMAC_SHA256(@key, @msg) AS HMAC_Resultado;
 GO
 
+-- Agregar la columna Activa si no existe y actualizar tabla con nuevos campos
+IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+               WHERE TABLE_NAME = 'TarjetasNFC' AND COLUMN_NAME = 'Activa')
+BEGIN
+    ALTER TABLE TarjetasNFC
+    ADD Activa BIT DEFAULT 1
+END
 
+-- Agregar la restricción UNIQUE al campo UID si no existe
+IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS 
+               WHERE TABLE_NAME = 'TarjetasNFC' AND CONSTRAINT_TYPE = 'UNIQUE'
+               AND CONSTRAINT_NAME LIKE '%UID%')
+BEGIN
+    ALTER TABLE TarjetasNFC
+    ADD CONSTRAINT UQ_TarjetasNFC_UID UNIQUE (UID)
+END
 
 
 INSERT INTO TarjetasNFC (UID) VALUES ('0xC5 0x9B 0x37 0x6');
@@ -320,3 +335,11 @@ INSERT INTO TarjetasNFC (UID) VALUES ('0xE2 0x89 0x41 0x6');
 
 
 
+-- Actualizar todos los registros existentes para que estén activos
+UPDATE TarjetasNFC 
+SET Activa = 1
+WHERE Activa IS NULL OR Activa = 0;
+
+-- O si quieres asegurarte de que TODOS los registros queden con Activa = 1
+UPDATE TarjetasNFC 
+SET Activa = 1;

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Registrar UID</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#f5f7fb; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .muted { color:#6c757d; }
+    #msg { font-weight: 600; margin-top: 14px; }
+  </style>
+</head>
+<body class="py-5">
+  <div class="container" style="max-width:560px;">
+    <div class="text-center mb-4">
+      <h3 class="mb-1">Registro de Nueva Tarjeta</h3>
+      <div class="muted">Acerca la tarjeta para capturar el UID automáticamente</div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <form id="formRegistro" class="row g-3">
+          <!-- UID -->
+          <div class="col-12">
+            <label class="form-label">UID</label>
+            <div class="input-group">
+              <input type="text" id="uid" name="uid" class="form-control mono text-center" placeholder="Esperando lectura..."
+                     required readonly>
+              <button class="btn btn-outline-secondary" type="button" id="toggleManual" title="Ingresar manualmente" disabled>Manual</button>
+            </div>
+            <div id="scanStatus" class="form-text">
+              <span id="scanIcon">🔎</span>
+              <span id="scanText">Escaneando tarjeta…</span>
+              <span class="ms-2 muted">Quedan <span id="countdown">2.0</span> s</span>
+            </div>
+          </div>
+
+          <!-- Nombre -->
+          <div class="col-12">
+            <label class="form-label">Nombre del Usuario</label>
+            <input type="text" id="nombre" name="nombre" class="form-control" required>
+          </div>
+
+          <!-- Correo -->
+          <div class="col-12">
+            <label class="form-label">Correo</label>
+            <input type="email" id="correo" name="correo" class="form-control" required>
+          </div>
+
+          <div class="col-12 d-grid">
+            <button type="submit" class="btn btn-success" id="btnReg" disabled>Registrar</button>
+          </div>
+        </form>
+
+        <div id="msg" class="text-center"></div>
+
+        <div class="text-center mt-3">
+          <a href="/" class="btn btn-outline-secondary">⬅ Volver al inicio</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const uidField = document.getElementById('uid');
+  const btnReg = document.getElementById('btnReg');
+  const toggleManual = document.getElementById('toggleManual');
+  const scanText = document.getElementById('scanText');
+  const scanIcon = document.getElementById('scanIcon');
+  const countdownEl = document.getElementById('countdown');
+  const msg = document.getElementById('msg');
+
+  // -------- Parámetros de escaneo --------
+  const windowSeconds = 5;          // ventana de aceptación en /api/ultimo-uid
+  const totalScanMs = 60000;        // duración total de escaneo en UI (1 minuto)
+  const tickMs = 500;               // frecuencia de polling (cada medio segundo)
+  let elapsed = 0;
+  let timer = null;
+  let found = false;
+  let manualMode = false;
+
+  function setStatus(text, ok=false, warn=false) {
+    scanText.textContent = text;
+    if (ok) scanIcon.textContent = '✅';
+    else if (warn) scanIcon.textContent = '⏳';
+    else scanIcon.textContent = '🔎';
+  }
+
+  function enableRegisterIfValid() {
+    const v = uidField.value.trim();
+    const isHex = /^[0-9A-Fa-f]{2,64}$/.test(v);
+    btnReg.disabled =
+      !isHex ||
+      !document.getElementById('nombre').value.trim() ||
+      !document.getElementById('correo').value.trim();
+  }
+
+  document.getElementById('nombre').addEventListener('input', enableRegisterIfValid);
+  document.getElementById('correo').addEventListener('input', enableRegisterIfValid);
+
+  toggleManual.addEventListener('click', () => {
+    manualMode = !manualMode;
+    if (manualMode) {
+      uidField.readOnly = false;
+      uidField.placeholder = 'Escribe el UID en HEX (p. ej. E2894106)';
+      toggleManual.textContent = 'Auto';
+      setStatus('Ingreso manual activado', false, true);
+      uidField.focus();
+    } else {
+      uidField.readOnly = true;
+      uidField.placeholder = 'Esperando lectura...';
+      toggleManual.textContent = 'Manual';
+      setStatus('Escaneando tarjeta…');
+      elapsed = 0;
+      found = false;
+      startScan();
+    }
+    enableRegisterIfValid();
+  });
+
+  async function pollLastUID() {
+    try {
+      const res = await fetch(`/api/ultimo-uid?seconds=${windowSeconds}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.found && data.uid) {
+        uidField.value = data.uid;
+        setStatus('✅ Tarjeta detectada correctamente', true);
+        found = true;
+        btnReg.disabled = false;
+        toggleManual.disabled = false;
+        clearInterval(timer);
+      }
+    } catch {
+      setStatus('Error contactando al servidor, reintentando…', false, true);
+    } finally {
+      enableRegisterIfValid();
+    }
+  }
+
+  function startScan() {
+    setStatus('Escaneando tarjeta…');
+    toggleManual.disabled = true;
+    btnReg.disabled = true;
+    msg.textContent = '';
+    uidField.value = '';
+
+    const start = performance.now();
+    clearInterval(timer);
+    timer = setInterval(() => {
+      const now = performance.now();
+      elapsed = now - start;
+      const remain = Math.max(0, totalScanMs - elapsed);
+      countdownEl.textContent = (remain / 1000).toFixed(1);
+
+      if (manualMode) {
+        clearInterval(timer);
+        return;
+      }
+
+      pollLastUID();
+
+      if (remain <= 0 && !found) {
+        clearInterval(timer);
+        setStatus('No se detectó tarjeta en 1 minuto. Puedes intentar de nuevo o usar modo manual.', false, true);
+        toggleManual.disabled = false;
+      }
+    }, tickMs);
+  }
+
+  window.addEventListener('DOMContentLoaded', startScan);
+
+  document.getElementById('formRegistro').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    btnReg.disabled = true;
+    msg.textContent = 'Procesando…';
+    msg.className = 'text-center text-muted';
+    try {
+      const fd = new FormData(e.target);
+      const res = await fetch('/agregar_tarjeta', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (data.mensaje) {
+        msg.textContent = data.mensaje;
+        msg.className = 'text-center text-success';
+        manualMode = false;
+        toggleManual.textContent = 'Manual';
+        startScan();
+      } else {
+        msg.textContent = 'Error: ' + (data.error || 'desconocido');
+        msg.className = 'text-center text-danger';
+        btnReg.disabled = false;
+      }
+    } catch {
+      msg.textContent = 'Error de red o servidor.';
+      msg.className = 'text-center text-danger';
+      btnReg.disabled = false;
+    }
+  });
+
+  uidField.addEventListener('input', enableRegisterIfValid);
+</script>
+
+</body>
+</html>

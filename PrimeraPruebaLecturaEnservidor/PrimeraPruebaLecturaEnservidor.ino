@@ -3,8 +3,8 @@
 #include <Wire.h>
 #include <Adafruit_PN532.h>
 #include <ESP32Servo.h>
+#include <ArduinoJson.h>
 
-// --- Pines I2C (PCB)
 #define SDA_PIN 21
 #define SCL_PIN 22
 
@@ -14,13 +14,12 @@ Servo servoMotor;
 const char* ssid = "ALVAREZ";
 const char* password = "CAMILO2003";
 
-// Dirección del servidor FastAPI
+// Servidor FastAPI
 const char* serverName = "http://192.168.1.7:8000/verificar/";
 
 void setup() {
   Serial.begin(115200);
 
-  // WiFi
   WiFi.begin(ssid, password);
   Serial.print("Conectando a WiFi");
   while (WiFi.status() != WL_CONNECTED) {
@@ -29,24 +28,21 @@ void setup() {
   }
   Serial.println("\n✅ WiFi conectado");
 
-  // PN532
   Wire.begin(SDA_PIN, SCL_PIN);
   nfc.begin();
-  uint32_t versiondata = nfc.getFirmwareVersion();
-  if (!versiondata) {
-    Serial.println("❌ No se encontró PN53x, revise conexiones");
+  if (!nfc.getFirmwareVersion()) {
+    Serial.println("❌ No se encontró PN53x");
     while (1);
   }
   nfc.SAMConfig();
-  Serial.println("✅ PN532 listo, esperando tarjeta...");
+  Serial.println("✅ PN532 listo");
 
-  // Servo
   servoMotor.attach(27, 500, 2400);
   servoMotor.write(0);
 }
 
 void loop() {
-  uint8_t uid[7];
+  uint8_t uid[7]; 
   uint8_t uidLength;
 
   if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength)) {
@@ -60,27 +56,40 @@ void loop() {
 
     if (WiFi.status() == WL_CONNECTED) {
       HTTPClient http;
-      String url = String(serverName) + uidHex;
-      http.begin(url);
-      int httpResponseCode = http.GET();
+      http.begin(serverName);
+      http.addHeader("Content-Type", "application/json");
+
+      // JSON de petición
+      String json = "{\"uid\":\"" + uidHex + "\"}";
+      int httpResponseCode = http.POST(json);
 
       if (httpResponseCode == 200) {
         String payload = http.getString();
         Serial.println("Respuesta: " + payload);
 
-        if (payload.indexOf("\"autorizado\":true") > 0) {
+        StaticJsonDocument<256> doc;
+        deserializeJson(doc, payload);
+
+        bool autorizado = doc["autorizado"];
+        if (autorizado) {
+          String nuevoUID = doc["nuevo_uid"];
+          String hash = doc["hash"];
+
           Serial.println("✅ Acceso autorizado");
+          Serial.println("Nuevo UID: " + nuevoUID);
+          Serial.println("Hash: " + hash);
+
           servoMotor.write(90);
           delay(2000);
           servoMotor.write(0);
         } else {
-          Serial.println("❌ Acceso denegado");
+          Serial.println("❌ Acceso denegado: " + String(doc["motivo"].as<const char*>()));
         }
       } else {
         Serial.println("Error HTTP: " + String(httpResponseCode));
       }
       http.end();
     }
-    delay(2000); // evitar múltiples lecturas rápidas
+    delay(2000);
   }
 }

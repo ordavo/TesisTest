@@ -1,168 +1,372 @@
 # main.py
-import os
-import uuid
-import binascii
-import hmac
-import hashlib
+import os, binascii, uuid, hmac, hashlib, time, threading
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict
 
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
-from dotenv import load_dotenv
 import pyodbc
+from fastapi import FastAPI, HTTPException, Query, Form, Request, Response
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-load_dotenv()
+from connection import connection_string
 
-# Cargar configuración desde .env
-DRIVER = os.getenv("SQLSERVER_DRIVER", "{ODBC Driver 17 for SQL Server}")
-SERVER = os.getenv("SQLSERVER_SERVER", "DESKTOP-UOJSRMF")
-DATABASE = os.getenv("SQLSERVER_DB", "Tesis")
-DB_USER = os.getenv("SQLSERVER_USER", "sa")
-DB_PASS = os.getenv("SQLSERVER_PASS", "")
-NONCE_TTL_SECONDS = int(os.getenv("NONCE_TTL_SECONDS", "10"))
+# ================== CONFIG ==================
+SECRET_KEY = b"MiEjemplo"
+NONCE_TTL_SECONDS = 3
 
-# Conexión ODBC
-CONN_STR = (
-    f"DRIVER={DRIVER};"
-    f"SERVER={SERVER};"
-    f"DATABASE={DATABASE};"
-    f"UID={DB_USER};"
-    f"PWD={DB_PASS}"
+# ================== DB CONN (POOL SENCILLO) ==================
+_pool_lock = threading.Lock()
+_conn_pool = None
+
+def get_db():
+    """Reutiliza una única conexión; si muere, reconecta."""
+    global _conn_pool
+    with _pool_lock:
+        if _conn_pool is None:
+            _conn_pool = pyodbc.connect(connection_string, autocommit=True)
+            return _conn_pool
+        try:
+            cur = _conn_pool.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            return _conn_pool
+        except Exception:
+            try:
+                _conn_pool.close()
+            except Exception:
+                pass
+            _conn_pool = pyodbc.connect(connection_string, autocommit=True)
+            return _conn_pool
+
+# ================== UTILS ==================
+def hex_to_bytes(s: str) -> bytes:
+    s = s.strip().replace(" ", "")
+    if s.lower().startswith("0x"):
+        s = s[2:]
+    return binascii.unhexlify(s)
+
+def bytes_to_hex(b: bytes) -> str:
+    return binascii.hexlify(b).decode()
+
+def generate_mapped_uid(n=4) -> str:
+    return binascii.hexlify(os.urandom(n)).decode().upper()
+
+# ----- Alias dinámicos -----
+def gen_alias_hex(nbytes: int = 8) -> str:
+    """Genera alias aleatorio en hex (16 caracteres, 8 bytes)."""
+    return binascii.hexlify(os.urandom(nbytes)).decode().upper()
+
+def rotate_alias(conn, uid_text: str) -> str:
+    """
+    Crea alias nuevo y actualiza AuthorizedTags.
+    Evita colisión por UNIQUE en UsedAliases.Alias (si choca, reintenta).
+    """
+    cur = conn.cursor()
+    while True:
+        alias = gen_alias_hex(8)
+        try:
+            cur.execute("""
+                INSERT INTO dbo.UsedAliases (UID, Alias)
+                VALUES (?, ?)
+            """, (uid_text, alias))
+
+            cur.execute("""
+                UPDATE dbo.AuthorizedTags
+                SET CurrentAlias = ?, LastRotated = SYSUTCDATETIME()
+                WHERE UID = ? AND Activa = 1
+            """, (alias, uid_text))
+
+            if cur.rowcount == 0:
+                # revertir si no existe tag activo
+                cur.execute("DELETE FROM dbo.UsedAliases WHERE Alias = ?", (alias,))
+                conn.commit()
+                raise HTTPException(status_code=400, detail="UID no autorizado o inactivo")
+
+            conn.commit()
+            return alias
+
+        except pyodbc.Error:
+            # posible colisión: vuelve a intentar con otro alias
+            continue
+
+# ================== APP ==================
+app = FastAPI(title="RFID Auth API (<2s)")
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+# --- CORS (abierto para la LAN) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-app = FastAPI(title="RFID Auth API (FastAPI)")
+# --- Middleware de tiempo ---
+@app.middleware("http")
+async def log_time(request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    dur = time.perf_counter() - start
+    print(f"[{request.url.path}] {dur:.3f}s")
+    return response
 
-# Pydantic model para POST /api/verify
-class VerifyRequest(BaseModel):
-    uid: str          # UID en hex (ej: "0C5B9B37")
-    sessionId: str    # GUID string
-    hmac: str         # HMAC en hex
+# ================== MODELOS ==================
+class VerifyReq(BaseModel):
+    uid: str
+    sessionId: str
+    hmac: str
 
-def get_db_connection():
-    # Abrir conexión pyodbc (caller debe cerrar)
-    return pyodbc.connect(CONN_STR, autocommit=True)
+# ================== ENDPOINTS CORE ==================
+# Salud
+@app.get("/health")
+def health():
+    return {"ok": True, "time": datetime.utcnow().isoformat()}
 
-def hex_to_bytes(hexstr: str) -> bytes:
-    # eliminar posibles 0x o espacios
-    s = hexstr.strip().lower()
-    if s.startswith("0x"):
-        s = s[2:]
-    s = s.replace(" ", "")
-    try:
-        return binascii.unhexlify(s)
-    except Exception as e:
-        raise ValueError(f"hex inválido: {hexstr}")
-
+# 1) NONCE
 @app.get("/api/nonce")
-def get_nonce(uid: str = Query(..., description="UID en hex, p.ej. 0C5B9B37")):
-    """
-    Genera un nonce para el UID dado y lo guarda en la tabla RFID_Sessions.
-    Retorna: {"sessionId":"<guid>", "nonce":"<hex>"}
-    """
+def api_nonce(uid: str = Query(..., description="UID en hex (ej: C59B3706)")):
     try:
-        uid_bin = hex_to_bytes(uid)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        _ = hex_to_bytes(uid)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"UID inválido: {e}")
 
     session_id = str(uuid.uuid4())
-    nonce = os.urandom(16)  # 16 bytes de nonce
+    nonce = os.urandom(16)
     expire_at = datetime.utcnow() + timedelta(seconds=NONCE_TTL_SECONDS)
 
-    # Insertar sesión en la tabla RFID_Sessions
-    conn = get_db_connection()
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        cur = conn.cursor()
-        # Asegúrate que tu tabla RFID_Sessions tiene columnas:
-        # SessionId UNIQUEIDENTIFIER, UID VARBINARY(...), Nonce VARBINARY(...), CreatedAt DATETIME2, ExpireAt DATETIME2
         cur.execute("""
-            INSERT INTO dbo.RFID_Sessions(SessionId, UID, Nonce, CreatedAt, ExpireAt)
-            VALUES(?, ?, ?, SYSUTCDATETIME(), ?)
-        """, (session_id, pyodbc.Binary(uid_bin), pyodbc.Binary(nonce), expire_at))
-        cur.close()
+            INSERT INTO RFID_Sessions (SessionId, UID, Nonce, CreatedAt, ExpireAt)
+            VALUES (?, ?, ?, SYSUTCDATETIME(), ?)
+        """, (session_id, uid, pyodbc.Binary(nonce), expire_at))
     except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=f"DB error al crear nonce: {e}")
-    conn.close()
+        print("⚠ Error SQL /api/nonce:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
 
-    return {"sessionId": session_id, "nonce": binascii.hexlify(nonce).decode()}
+    return {"sessionId": session_id, "nonce": bytes_to_hex(nonce)}
 
+# 2) VERIFY
 @app.post("/api/verify")
-def verify(req: VerifyRequest):
-    """
-    Recibe JSON { uid, sessionId, hmac }.
-    Verifica HMAC calculado como HMAC_SHA256(KeySecret, UID_bin || nonce_bin).
-    Devuelve {"result":"OK"} o {"result":"DENIED", "reason": "..."}.
-    """
-    # 1) validar y convertir
+def api_verify(req: VerifyReq):
+    conn = get_db()
+    cur = conn.cursor()
     try:
         uid_bin = hex_to_bytes(req.uid)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        try:
+            provided_hmac = binascii.unhexlify(req.hmac)
+        except Exception:
+            return {"result": "DENIED", "reason": "HMAC_MALFORMADO"}
 
-    # sessionId (GUID) y hmac hex
-    try:
-        provided_hmac = binascii.unhexlify(req.hmac)
-    except Exception:
-        raise HTTPException(status_code=400, detail="HMAC hex inválido")
-
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-
-        # 2) recuperar nonce de la sesión y validar existencia/expiración
-        cur.execute("SELECT Nonce, ExpireAt FROM dbo.RFID_Sessions WHERE SessionId = ?", (req.sessionId,))
+        # Sesión
+        cur.execute("SELECT Nonce, ExpireAt FROM RFID_Sessions WHERE SessionId = ?", (req.sessionId,))
         row = cur.fetchone()
         if not row:
-            cur.close()
-            conn.close()
             return {"result": "DENIED", "reason": "SESSION_INVALIDA"}
 
-        nonce_bin = row[0]  # varbinary
-        expire_at = row[1]
+        nonce, expire_at = bytes(row[0]), row[1]
         if datetime.utcnow() > expire_at:
-            # borrar la session y denegar
-            cur.execute("DELETE FROM dbo.RFID_Sessions WHERE SessionId = ?", (req.sessionId,))
-            cur.close()
-            conn.close()
+            cur.execute("DELETE FROM RFID_Sessions WHERE SessionId = ?", (req.sessionId,))
+            conn.commit()
             return {"result": "DENIED", "reason": "SESSION_EXPIRADA"}
 
-        # 3) recuperar la key secreta asociada al UID (tabla RFID_Tags)
-        cur.execute("SELECT KeySecret FROM dbo.RFID_Tags WHERE UID = ? AND Enabled = 1", (pyodbc.Binary(uid_bin),))
-        row2 = cur.fetchone()
-        if not row2:
-            cur.close()
-            conn.close()
-            return {"result": "DENIED", "reason": "UID_NO_REGISTRADO"}
-
-        key_bin = bytes(row2[0])  # obtén los bytes de la columna varbinary
-
-        # 4) calcular HMAC-SHA256 en el servidor: HMAC(key, UID || nonce)
-        message = uid_bin + bytes(nonce_bin)
-        hm = hmac.new(key_bin, message, hashlib.sha256).digest()
-
-        # 5) comparar de forma segura
-        if hmac.compare_digest(hm, provided_hmac):
-            # éxito -> borrar sesión para evitar replay
-            cur.execute("DELETE FROM dbo.RFID_Sessions WHERE SessionId = ?", (req.sessionId,))
-            # opcional: registrar log en LogAccesos o tabla de auditoría
-            cur.execute("""
-                INSERT INTO dbo.LogAccesos (UID, HashHMAC, AccesoPermitido)
-                VALUES (?, ?, 1)
-            """, (pyodbc.Binary(uid_bin), pyodbc.Binary(provided_hmac)))
-            cur.close()
-            conn.close()
-            return {"result": "OK"}
-        else:
-            # registrar intento fallido
-            cur.execute("""
-                INSERT INTO dbo.LogAccesos (UID, HashHMAC, AccesoPermitido)
-                VALUES (?, ?, 0)
-            """, (pyodbc.Binary(uid_bin), pyodbc.Binary(provided_hmac)))
-            cur.close()
-            conn.close()
+        # HMAC
+        hm_server = hmac.new(SECRET_KEY, uid_bin + nonce, hashlib.sha256).digest()
+        if not hmac.compare_digest(hm_server, provided_hmac):
+            cur.execute(
+                "INSERT INTO LogAccesos (UID, Resultado, Details) VALUES (?, 'DENIED', 'HMAC_INVALIDO')",
+                (req.uid,),
+            )
+            conn.commit()
             return {"result": "DENIED", "reason": "HMAC_INVALIDO"}
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=f"DB error en verify: {e}")
 
+        # Validación de autorización
+        cur.execute("SELECT IdUsuario, Activa FROM AuthorizedTags WHERE UID = ?", (req.uid,))
+        tag = cur.fetchone()
+        if not tag or not tag[1]:
+            cur.execute(
+                "INSERT INTO LogAccesos (UID, Resultado, Details) VALUES (?, 'DENIED', 'NO_AUTORIZADO')",
+                (req.uid,),
+            )
+            conn.commit()
+            return {"result": "DENIED", "reason": "NO_AUTORIZADO"}
+
+        id_usuario = tag[0]
+
+        # Registrar OK y cerrar sesión
+        cur.execute("INSERT INTO LogAccesos (UID, Resultado) VALUES (?, 'OK')", (req.uid,))
+        cur.execute("DELETE FROM RFID_Sessions WHERE SessionId = ?", (req.sessionId,))
+        # (Opcional) registrar uso del UID
+        cur.execute(
+            "INSERT INTO UsedTags (UID, IdUsuario, Motivo) VALUES (?, ?, 'Post-OK')",
+            (req.uid, id_usuario),
+        )
+        conn.commit()
+
+        # Rotación de alias
+        new_alias = rotate_alias(conn, req.uid)
+        return {"result": "OK", "alias": new_alias}
+
+    except Exception as e:
+        print("Error /api/verify:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+
+# 3) Registro de tarjeta
+@app.post("/agregar_tarjeta")
+def agregar_tarjeta(uid: str = Form(...), nombre: str = Form(...), correo: str = Form(...)):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT IdUsuario FROM Usuarios WHERE Nombre = ?", (nombre,))
+        user = cur.fetchone()
+        if not user:
+            cur.execute("INSERT INTO Usuarios (Nombre, Correo) VALUES (?, ?)", (nombre, correo))
+            cur.execute("SELECT IdUsuario FROM Usuarios WHERE Nombre = ?", (nombre,))
+            user = cur.fetchone()
+        id_usuario = user[0]
+
+        cur.execute(
+            "INSERT INTO AuthorizedTags (UID, IdUsuario, Activa) VALUES (?, ?, 1)",
+            (uid, id_usuario),
+        )
+        conn.commit()
+        return {"mensaje": f"Tarjeta {uid} vinculada al usuario {nombre}"}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        cur.close()
+
+# 4) Listado de logs (para /mostrar)
+@app.get("/api/logs")
+def api_logs(
+    response: Response,  # <- NO opcional para evitar problemas de tipado en arranque
+    uid: Optional[str] = Query(None, description="UID en hex opcional"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    # Evita caché
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+
+    cur = get_db().cursor()
+    try:
+        if uid:
+            cur.execute(f"""
+                SELECT TOP ({limit}) IdLog, UID, Resultado, ISNULL(Details,''), Fecha
+                FROM dbo.LogAccesos
+                WHERE UID = ?
+                ORDER BY Fecha DESC, IdLog DESC
+            """, (uid,))
+        else:
+            cur.execute(f"""
+                SELECT TOP ({limit}) IdLog, UID, Resultado, ISNULL(Details,''), Fecha
+                FROM dbo.LogAccesos
+                ORDER BY Fecha DESC, IdLog DESC
+            """)
+
+        rows = cur.fetchall()
+        data: List[Dict] = []
+        for r in rows:
+            data.append({
+                "id": r[0],
+                "uid": r[1],
+                "resultado": r[2],
+                "details": r[3],
+                "fecha": r[4].isoformat() if r[4] else None
+            })
+        return {"count": len(data), "items": data}
+    finally:
+        cur.close()
+
+# 5) Último log (compatibilidad)
+@app.get("/api/logs/last")
+def api_logs_last(uid: Optional[str] = Query(None, description="UID en hex opcional")):
+    cur = get_db().cursor()
+    try:
+        if uid:
+            cur.execute("""
+                SELECT TOP 1 IdLog, UID, Resultado, ISNULL(Details,''), Fecha
+                FROM dbo.LogAccesos
+                WHERE UID = ?
+                ORDER BY Fecha DESC, IdLog DESC
+            """, (uid,))
+        else:
+            cur.execute("""
+                SELECT TOP 1 IdLog, UID, Resultado, ISNULL(Details,''), Fecha
+                FROM dbo.LogAccesos
+                ORDER BY Fecha DESC, IdLog DESC
+            """)
+        row = cur.fetchone()
+        if not row:
+            return {"hasData": False}
+        idlog, ruid, resu, det, fecha = row
+        return {
+            "hasData": True,
+            "id": idlog,
+            "uid": ruid,
+            "resultado": resu,
+            "details": det,
+            "fecha": fecha.isoformat()
+        }
+    finally:
+        cur.close()
+        
+@app.get("/api/ultimo-uid")
+def ultimo_uid(seconds: int = 10):
+    """
+    Devuelve el último UID leído en RFID_Sessions.
+    'seconds' = ventana máxima de antigüedad (por defecto 10 s).
+    Respuesta:
+      { "found": true/false, "uid": "E2894106", "createdAt": "..." }
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT TOP 1 UID, CreatedAt
+            FROM dbo.RFID_Sessions
+            ORDER BY CreatedAt DESC
+        """)
+        row = cur.fetchone()
+        if not row:
+            return {"found": False}
+
+        uid, created_at = row
+        # created_at ya viene en UTC por SYSUTCDATETIME()
+        if (datetime.utcnow() - created_at).total_seconds() <= seconds:
+            return {"found": True, "uid": uid, "createdAt": created_at.isoformat()}
+        else:
+            return {"found": False, "createdAt": created_at.isoformat()}
+    finally:
+        cur.close()
+
+# ================== VISTAS ==================
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/mostrar", response_class=HTMLResponse)
+def mostrar_uid(request: Request):
+    return templates.TemplateResponse("mostrar.html", {"request": request})
+
+@app.get("/registrar", response_class=HTMLResponse)
+def registrar_uid(request: Request):
+    return templates.TemplateResponse("registrar.html", {"request": request})
+
+@app.get("/rechazado", response_class=HTMLResponse)
+def acceso_rechazado(request: Request):
+    return HTMLResponse("""
+    <html><body style="font-family:Arial;text-align:center;background:#fee;">
+    <h1 style="color:#d00;">❌ Acceso denegado</h1>
+    <p>Tiempo expirado o cancelado.</p>
+    </body></html>
+    """)

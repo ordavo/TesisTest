@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Estado y Logs de Acceso RFID</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#f5f7fb; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .card { box-shadow: 0 8px 24px rgba(0,0,0,.06); }
+    .badge-lg { font-size: 1rem; }
+    #err { white-space: pre-wrap; }
+  </style>
+</head>
+<body class="py-5">
+
+<div class="container" style="max-width: 980px;">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Estado y Logs de Acceso RFID</h3>
+    <a class="btn btn-outline-secondary" href="/">⬅ Volver al inicio</a>
+  </div>
+
+  <!-- Estado último evento -->
+  <div class="card mb-4">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <div>
+          <div class="text-muted">Último evento</div>
+          <div class="h5 mono mb-0" id="lastLabel">—</div>
+        </div>
+        <div id="lastBadge" class="badge badge-lg bg-secondary">SIN DATOS</div>
+      </div>
+      <hr>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <div class="text-muted">UID</div>
+          <div id="lastUID" class="mono">—</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted">Detalle</div>
+          <div id="lastDetail" class="mono">—</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted">Fecha</div>
+          <div id="lastDate" class="mono">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Filtros -->
+  <div class="card mb-3">
+    <div class="card-body">
+      <form id="filtros" class="row g-2 align-items-end">
+        <div class="col-md-4">
+          <label class="form-label">UID (opcional)</label>
+          <input id="uidInput" class="form-control mono" placeholder="E2894106">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Límite</label>
+          <input id="limitInput" type="number" min="1" max="500" value="50" class="form-control">
+        </div>
+        <div class="col-md-6">
+          <button class="btn btn-primary me-2" type="submit">Aplicar</button>
+          <button class="btn btn-outline-secondary" type="button" id="pauseBtn">Pausar auto</button>
+          <small class="text-muted ms-2">Actualiza cada 2 min</small>
+        </div>
+      </form>
+      <div id="err" class="small text-danger mt-2"></div>
+    </div>
+  </div>
+
+  <!-- Tabla -->
+  <div class="card">
+    <div class="card-body">
+      <div class="table-responsive">
+        <table class="table align-middle table-hover mb-0">
+          <thead class="table-light">
+            <tr>
+              <th class="text-nowrap">IdLog</th>
+              <th>UID</th>
+              <th>Resultado</th>
+              <th>Detalle</th>
+              <th>Fecha</th>
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr><td colspan="5" class="text-center text-muted py-4">Cargando…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // --- Utils ---
+  const $ = (id) => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+
+  // Carga parámetros iniciales desde la URL (si existen)
+  if (qs.get('uid')) $('uidInput').value = qs.get('uid');
+  if (qs.get('limit')) $('limitInput').value = qs.get('limit');
+
+  let autoTimer = null;
+  let autoPaused = false;
+
+  function setAutoTimer() {
+    clearInterval(autoTimer);
+    autoTimer = setInterval(() => { if (!autoPaused) loadLogs(); }, 120000); // 2 min
+  }
+
+  $('pauseBtn').addEventListener('click', () => {
+    autoPaused = !autoPaused;
+    $('pauseBtn').textContent = autoPaused ? 'Reanudar auto' : 'Pausar auto';
+  });
+
+  // Normaliza claves por si vienen en MAYÚSCULAS (COUNT / Details)
+  function normalizeResponse(json) {
+    const count = json.count ?? json.COUNT ?? 0;
+    const items = (json.items || []).map(it => ({
+      id: it.id ?? it.IdLog ?? null,
+      uid: it.uid ?? it.UID ?? '',
+      resultado: it.resultado ?? it.Resultado ?? '',
+      details: it.details ?? it.Details ?? '',
+      fecha: it.fecha ?? it.Fecha ?? null,
+    }));
+    return { count, items };
+  }
+
+  async function loadLogs() {
+    try {
+      $('err').textContent = '';
+      const uid = $('uidInput').value.trim();
+      let limit = parseInt($('limitInput').value || '50', 10);
+      if (isNaN(limit) || limit < 1) limit = 50;
+      if (limit > 500) limit = 500;
+
+      const url = uid
+        ? `/api/logs?uid=${encodeURIComponent(uid)}&limit=${limit}`
+        : `/api/logs?limit=${limit}`;
+
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const raw = await res.json();
+      const { count, items } = normalizeResponse(raw);
+
+      // Render tabla
+      const tb = $('tbody');
+      tb.innerHTML = '';
+      if (!items.length) {
+        tb.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-4">Sin datos</td></tr>`;
+      } else {
+        for (const it of items) {
+          const tr = document.createElement('tr');
+          const badge = it.resultado === 'OK'
+            ? '<span class="badge bg-success">OK</span>'
+            : '<span class="badge bg-danger">DENIED</span>';
+          tr.innerHTML = `
+            <td class="mono">${it.id ?? '—'}</td>
+            <td class="mono">${it.uid || '—'}</td>
+            <td>${badge}</td>
+            <td class="mono">${it.details || '—'}</td>
+            <td class="mono">${it.fecha ? new Date(it.fecha).toLocaleString() : '—'}</td>
+          `;
+          tb.appendChild(tr);
+        }
+      }
+
+      // Render “último evento” (ítem 0)
+      const last = items[0];
+      if (!last) {
+        $('lastLabel').textContent = '—';
+        $('lastUID').textContent = '—';
+        $('lastDetail').textContent = '—';
+        $('lastDate').textContent = '—';
+        $('lastBadge').textContent = 'SIN DATOS';
+        $('lastBadge').className = 'badge badge-lg bg-secondary';
+      } else {
+        $('lastLabel').textContent = `${last.uid} — ${last.resultado}`;
+        $('lastUID').textContent = last.uid || '—';
+        $('lastDetail').textContent = last.details || '—';
+        $('lastDate').textContent = last.fecha ? new Date(last.fecha).toLocaleString() : '—';
+        if (last.resultado === 'OK') {
+          $('lastBadge').textContent = 'ACCESO PERMITIDO';
+          $('lastBadge').className = 'badge badge-lg bg-success';
+        } else {
+          $('lastBadge').textContent = 'ACCESO DENEGADO';
+          $('lastBadge').className = 'badge badge-lg bg-danger';
+        }
+      }
+    } catch (e) {
+      $('err').textContent = 'Error cargando /api/logs: ' + (e?.message || e);
+      const tb = $('tbody');
+      tb.innerHTML = `<tr><td colspan="5" class="text-center text-warning py-4">Error al cargar</td></tr>`;
+    }
+  }
+
+  // Submit filtros
+  $('filtros').addEventListener('submit', (e) => {
+    e.preventDefault();
+    // Actualiza querystring por si quieres compartir la URL
+    const p = new URLSearchParams();
+    if ($('uidInput').value.trim()) p.set('uid', $('uidInput').value.trim());
+    if ($('limitInput').value) p.set('limit', $('limitInput').value);
+    history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p.toString() : ''));
+    loadLogs();
+  });
+
+  // Primera carga + auto
+  loadLogs();
+  setAutoTimer();
+</script>
+</body>
+</html>

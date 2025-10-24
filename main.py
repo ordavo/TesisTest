@@ -15,9 +15,9 @@ from connection import connection_string
 
 # ================== CONFIG ==================
 SECRET_KEY = b"MiEjemplo"
-NONCE_TTL_SECONDS = 3
+NONCE_TTL_SECONDS = 3  # segundos
 
-# ================== DB CONN (POOL SENCILLO) ==================
+# ================== DB POOL ==================
 _pool_lock = threading.Lock()
 _conn_pool = None
 
@@ -50,9 +50,6 @@ def hex_to_bytes(s: str) -> bytes:
 
 def bytes_to_hex(b: bytes) -> str:
     return binascii.hexlify(b).decode()
-
-def generate_mapped_uid(n=4) -> str:
-    return binascii.hexlify(os.urandom(n)).decode().upper()
 
 # ----- Alias dinámicos -----
 def gen_alias_hex(nbytes: int = 8) -> str:
@@ -166,8 +163,12 @@ def api_verify(req: VerifyReq):
         except Exception:
             return {"result": "DENIED", "reason": "HMAC_MALFORMADO"}
 
-        # Sesión
-        cur.execute("SELECT Nonce, ExpireAt FROM RFID_Sessions WHERE SessionId = ?", (req.sessionId,))
+        # Sesión (ligada a UID)
+        cur.execute("""
+            SELECT Nonce, ExpireAt
+            FROM RFID_Sessions
+            WHERE SessionId = ? AND UID = ?
+        """, (req.sessionId, req.uid))
         row = cur.fetchone()
         if not row:
             return {"result": "DENIED", "reason": "SESSION_INVALIDA"}
@@ -249,7 +250,7 @@ def agregar_tarjeta(uid: str = Form(...), nombre: str = Form(...), correo: str =
 # 4) Listado de logs (para /mostrar)
 @app.get("/api/logs")
 def api_logs(
-    response: Response,  # <- NO opcional para evitar problemas de tipado en arranque
+    response: Response,
     uid: Optional[str] = Query(None, description="UID en hex opcional"),
     limit: int = Query(50, ge=1, le=500),
 ):
@@ -319,14 +320,14 @@ def api_logs_last(uid: Optional[str] = Query(None, description="UID en hex opcio
         }
     finally:
         cur.close()
-        
+
+# 6) Último UID de sesiones recientes
 @app.get("/api/ultimo-uid")
 def ultimo_uid(seconds: int = 10):
     """
     Devuelve el último UID leído en RFID_Sessions.
     'seconds' = ventana máxima de antigüedad (por defecto 10 s).
-    Respuesta:
-      { "found": true/false, "uid": "E2894106", "createdAt": "..." }
+    Respuesta: { "found": true/false, "uid": "E2894106", "createdAt": "..." }
     """
     conn = get_db()
     cur = conn.cursor()
@@ -341,7 +342,7 @@ def ultimo_uid(seconds: int = 10):
             return {"found": False}
 
         uid, created_at = row
-        # created_at ya viene en UTC por SYSUTCDATETIME()
+        # created_at proviene de SYSUTCDATETIME() (UTC naive)
         if (datetime.utcnow() - created_at).total_seconds() <= seconds:
             return {"found": True, "uid": uid, "createdAt": created_at.isoformat()}
         else:

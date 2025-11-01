@@ -126,7 +126,7 @@
       const data = await res.json();
       if (data && data.found && data.uid) {
         uidField.value = data.uid;
-        setStatus('✅ Tarjeta detectada correctamente', true);
+        setStatus(' Tarjeta detectada correctamente', true);
         found = true;
         btnReg.disabled = false;
         toggleManual.disabled = false;

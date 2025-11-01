@@ -1,0 +1,6 @@
+test,total_rows,OK,pct_OK,lat_mean_s,lat_median_s,lat_min_s,lat_max_s,lat_std_s,throughput_OK_per_s,alias_total_seen,alias_unique,alias_pct_unique,alias_collisions
+ok_single,500,500,100.0,4.1036,4.1028,4.051,4.1948,0.0206,0.2437,500,500,100.0,0
+denied_hmac,500,0,0.0,4.1044,4.1081,4.0458,4.1726,0.0214,0.0,0,0,0.0,0
+session_expired,500,0,0.0,8.108,8.1077,8.0466,9.5403,0.0682,0.0,0,0,0.0,0
+unauthorized_uid,500,0,0.0,4.1053,4.1073,4.0431,4.1724,0.0235,0.0,0,0,0.0,0
+burst_load,500,0,0.0,82.521,82.519,82.1079,82.8737,0.1043,0.0,500,500,100.0,0

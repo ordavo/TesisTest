@@ -3,7 +3,7 @@ import os
 
 # Ajusta si usas otro driver
 ODBC_DRIVER = os.getenv("ODBC_DRIVER", "{ODBC Driver 17 for SQL Server}")
-SERVER      = os.getenv("SQLSERVER", "DESKTOP-UOJSRMF")   # "SERVER\\INSTANCIA" si aplica
+SERVER      = os.getenv("SQLSERVER", "DESKTOP-UOJSRMF")   # SERVER
 DATABASE    = os.getenv("SQLDB", "Tesis")
 USER        = os.getenv("SQLUSER", "sa")
 PASSWORD    = os.getenv("SQLPWD", "Guadual1t0")

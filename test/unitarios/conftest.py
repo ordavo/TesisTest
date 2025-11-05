@@ -6,7 +6,7 @@ import pytest
 import importlib
 
 # ----------------------------------------------------------
-# 1️⃣  Asegura que se pueda importar main.py desde la raíz
+# 1  Asegura que se pueda importar main.py desde la raíz
 # ----------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]  # .../Tesis
 sys.path.insert(0, str(ROOT))
@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 
 # ----------------------------------------------------------
-# 2️⃣  FakeCursor y FakeConn: BD simulada en memoria
+# 2  FakeCursor y FakeConn: BD simulada en memoria
 # ----------------------------------------------------------
 class FakeCursor:
     def __init__(self, store):
@@ -123,7 +123,7 @@ def make_fake_get_db():
 
 
 # ----------------------------------------------------------
-# 3️⃣  Fixture 'client' accesible desde todos los tests
+# 3  Fixture 'client' accesible desde todos los tests
 # ----------------------------------------------------------
 @pytest.fixture
 def client():

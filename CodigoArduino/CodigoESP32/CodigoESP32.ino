@@ -1,9 +1,3 @@
-/******************************************************
- * ESP32 + PN532 (I2C con IRQ/RESET) + Servo + FastAPI
- * Flujo: GET /api/nonce → POST /api/verify (HMAC-SHA256)
- * HMAC sobre BYTES(uid||nonce) ✅
- ******************************************************/
-
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Wire.h>

@@ -1,4 +1,3 @@
-# main.py
 import os, binascii, uuid, hmac, hashlib, time, threading
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
@@ -22,7 +21,7 @@ _pool_lock = threading.Lock()
 _conn_pool = None
 
 def get_db():
-    """Reutiliza una única conexión; si muere, reconecta."""
+    """Reutiliza una única conexión reconecta"""
     global _conn_pool
     with _pool_lock:
         if _conn_pool is None:
@@ -53,13 +52,13 @@ def bytes_to_hex(b: bytes) -> str:
 
 # ----- Alias dinámicos -----
 def gen_alias_hex(nbytes: int = 8) -> str:
-    """Genera alias aleatorio en hex (16 caracteres, 8 bytes)."""
+    """Genera alias aleatorio en hex (16 caracteres, 8 bytes)"""
     return binascii.hexlify(os.urandom(nbytes)).decode().upper()
 
 def rotate_alias(conn, uid_text: str) -> str:
     """
-    Crea alias nuevo y actualiza AuthorizedTags.
-    Evita colisión por UNIQUE en UsedAliases.Alias (si choca, reintenta).
+    Crea alias nuevo y actualiza tabla AuthorizedTags.
+    Evita colisión por UNIQUE en UsedAliases.Alias (si choca, reintenta)
     """
     cur = conn.cursor()
     while True:
@@ -86,11 +85,11 @@ def rotate_alias(conn, uid_text: str) -> str:
             return alias
 
         except pyodbc.Error:
-            # posible colisión: vuelve a intentar con otro alias
+            # colisiona, vuelve a intentar con otro alias
             continue
 
 # ================== APP ==================
-app = FastAPI(title="RFID Auth API (<2s)")
+app = FastAPI(title="RFID Auth API (2s)")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -103,7 +102,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Middleware de tiempo ---
+# --- Middleware  tiempo ---
 @app.middleware("http")
 async def log_time(request, call_next):
     start = time.perf_counter()
@@ -126,7 +125,7 @@ def health():
 
 # 1) NONCE
 @app.get("/api/nonce")
-def api_nonce(uid: str = Query(..., description="UID en hex (ej: C59B3706)")):
+def api_nonce(uid: str = Query(..., description="UID en hex (ejemplo: C59B3706)")):
     try:
         _ = hex_to_bytes(uid)
     except Exception as e:
@@ -144,7 +143,7 @@ def api_nonce(uid: str = Query(..., description="UID en hex (ej: C59B3706)")):
             VALUES (?, ?, ?, SYSUTCDATETIME(), ?)
         """, (session_id, uid, pyodbc.Binary(nonce), expire_at))
     except Exception as e:
-        print("⚠ Error SQL /api/nonce:", e)
+        print("Error SQL /api/nonce:", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
@@ -247,14 +246,14 @@ def agregar_tarjeta(uid: str = Form(...), nombre: str = Form(...), correo: str =
     finally:
         cur.close()
 
-# 4) Listado de logs (para /mostrar)
+# 4) Listado de logs mostrar
 @app.get("/api/logs")
 def api_logs(
     response: Response,
     uid: Optional[str] = Query(None, description="UID en hex opcional"),
     limit: int = Query(50, ge=1, le=500),
 ):
-    # Evita caché
+    # borra caache
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
 
@@ -288,7 +287,7 @@ def api_logs(
     finally:
         cur.close()
 
-# 5) Último log (compatibilidad)
+# 5) ultimo log compatibilidad
 @app.get("/api/logs/last")
 def api_logs_last(uid: Optional[str] = Query(None, description="UID en hex opcional")):
     cur = get_db().cursor()
@@ -321,7 +320,7 @@ def api_logs_last(uid: Optional[str] = Query(None, description="UID en hex opcio
     finally:
         cur.close()
 
-# 6) Último UID de sesiones recientes
+# 6) ultimo UID de sesiones recientes
 @app.get("/api/ultimo-uid")
 def ultimo_uid(seconds: int = 10):
     """
@@ -367,7 +366,7 @@ def registrar_uid(request: Request):
 def acceso_rechazado(request: Request):
     return HTMLResponse("""
     <html><body style="font-family:Arial;text-align:center;background:#fee;">
-    <h1 style="color:#d00;">❌ Acceso denegado</h1>
+    <h1 style="color:#d00;">X Acceso denegado</h1>
     <p>Tiempo expirado o cancelado.</p>
     </body></html>
     """)
